@@ -1,0 +1,17 @@
+{
+  "name": "receiptbox",
+  "version": "0.1.0",
+  "description": "Employees upload their scanned receipts; an LLM turns them into an expense report.",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "llm-sandbox": "node vendor/llm-sandbox/server.js",
+    "samples": "node scripts/make-samples.js",
+    "demo": "node scripts/demo.js",
+    "test": "node --test test/"
+  }
+}

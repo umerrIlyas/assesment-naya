@@ -1,0 +1,4 @@
+node_modules/
+data/
+samples/big.txt
+.DS_Store

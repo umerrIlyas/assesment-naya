@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ReceiptBox</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #fff; --text: #1d2330; --muted: #6b7385; --border: #e2e5eb;
+    --accent: #3b5bdb; --accent-soft: #e7ecff; --accent-text: #fff;
+    --pending: #8a8f9c; --processing: #d9822b; --done: #2f9e44; --failed: #e03131;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14161b; --panel: #1c1f26; --text: #e6e8ee; --muted: #9098a9; --border: #2c313b;
+      --accent: #5c7cfa; --accent-soft: #232a45; --accent-text: #fff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 system-ui, -apple-system, sans-serif; }
+  header { padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel); }
+  header h1 { margin: 0; font-size: 18px; }
+  header p { margin: 2px 0 0; color: var(--muted); }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px 16px; display: grid; gap: 20px; grid-template-columns: 1fr; }
+  @media (min-width: 900px) { main { grid-template-columns: 1fr 1fr; } .wide { grid-column: 1 / -1; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 16px; min-width: 0; }
+  h2 { margin: 0 0 4px; font-size: 15px; }
+  .step { display: inline-flex; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: var(--accent-text);
+    font-size: 12px; align-items: center; justify-content: center; margin-right: 6px; }
+  .hint { color: var(--muted); font-size: 13px; margin: 0 0 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button, input, select {
+    font: inherit; color: var(--text); background: var(--panel);
+    border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px;
+  }
+  button { cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); }
+  input[type=text] { flex: 1; min-width: 140px; }
+  .drop { border: 2px dashed var(--border); border-radius: 8px; padding: 16px; text-align: center; color: var(--muted); }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  .how { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; }
+  .how li { display: flex; gap: 10px; align-items: flex-start; }
+  .how .n { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--accent-soft); color: var(--accent);
+    font-weight: 600; font-size: 12px; display: flex; align-items: center; justify-content: center; }
+  .how b { display: block; }
+  .how span { color: var(--muted); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  tfoot td { border-bottom: 0; font-weight: 600; }
+  tbody tr { cursor: pointer; }
+  tbody tr:hover, tbody tr.selected { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  .scroll { overflow-x: auto; }
+  .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; color: #fff; background: var(--pending); }
+  .badge.processing { background: var(--processing); } .badge.done { background: var(--done); } .badge.failed { background: var(--failed); }
+  .type { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; background: var(--accent-soft); color: var(--accent); }
+  .mono { font-family: ui-monospace, Menlo, monospace; font-size: 12px; }
+  .muted { color: var(--muted); }
+  .empty { color: var(--muted); padding: 16px 0; text-align: center; white-space: normal; }
+  .page-facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; margin: 8px 0; }
+  .fact { background: var(--bg); border-radius: 6px; padding: 8px 10px; }
+  .fact small { display: block; color: var(--muted); font-size: 12px; }
+  #detail pre { margin: 0; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto;
+    background: var(--bg); padding: 10px; border-radius: 6px; font-size: 12px; }
+  #status { font-size: 13px; color: var(--muted); min-height: 20px; margin-top: 8px; }
+  #status.error { color: var(--failed); }
+  .err { color: var(--failed); font-size: 12px; white-space: normal; max-width: 360px; }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .chips button { border-radius: 14px; font-size: 13px; padding: 4px 10px; }
+  #chat { display: grid; gap: 8px; max-height: 360px; overflow-y: auto; margin-bottom: 12px; }
+  .msg { padding: 8px 12px; border-radius: 8px; max-width: 80%; white-space: pre-wrap; word-break: break-word; }
+  .msg.q { justify-self: end; background: var(--accent); color: var(--accent-text); }
+  .msg.a { justify-self: start; background: var(--bg); }
+  .msg.a.error { color: var(--failed); }
+  .msg small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ReceiptBox</h1>
+  <p>Scan your trip receipts into one file, upload it, and get your expense report filled in for you.</p>
+</header>
+
+<main>
+  <section>
+    <h2><span class="step">1</span>Upload your scanned receipts</h2>
+    <p class="hint">One file from the scanning app, with one receipt per page: coffee, taxis, hotels, flights, anything you're claiming.</p>
+    <div class="row" style="margin-bottom:12px">
+      <span class="muted" style="font-size:13px">Try a sample:</span>
+      <button class="primary" data-sample="weekend-trip.txt">Weekend trip (6 pages)</button>
+      <button data-sample="sales-quarter.txt">Sales quarter (80)</button>
+      <button data-sample="conference-trip.txt">Conference trip (30)</button>
+    </div>
+    <div class="drop" id="drop">…or drop your own <span class="mono">.txt</span> file here, or <label style="color:var(--accent);cursor:pointer;text-decoration:underline">choose one<input type="file" id="file" hidden></label>
+      <div class="muted" style="font-size:12px;margin-top:4px">Pages are separated by a form-feed character (<span class="mono">\f</span>).</div>
+    </div>
+    <div id="status"></div>
+  </section>
+
+  <section>
+    <h2>How it works</h2>
+    <ol class="how" style="margin-top:10px">
+      <li><div class="n">1</div><div><b>Scan your receipts into one file and upload it</b><span>One receipt per page, straight from the scanning app.</span></div></li>
+      <li><div class="n">2</div><div><b>An LLM (dummy) reads every receipt</b><span>It pulls out the merchant, date, amount, currency and expense category.</span></div></li>
+      <li><div class="n">3</div><div><b>Your expense report is filled in</b><span>One line per receipt, with the total to reimburse. Click a line to check it against the receipt.</span></div></li>
+      <li><div class="n">4</div><div><b>Ask questions about it</b><span>"What was my biggest expense?" "How much did I spend on meals?"</span></div></li>
+    </ol>
+  </section>
+
+  <section class="wide">
+    <h2><span class="step">2</span>Uploaded scans</h2>
+    <p class="hint">Each scan is read receipt by receipt in the background. Click a scan to see its receipts.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Scan</th><th>Status</th><th>Progress</th><th class="num">Receipts read</th><th>Uploaded</th><th>ID</th><th></th></tr></thead>
+        <tbody id="docs"><tr><td colspan="7" class="empty">Nothing uploaded yet. Try a sample scan above.</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide">
+    <h2><span class="step">3</span>Expense report</h2>
+    <p class="hint">One line per receipt, filled in by the LLM across all your scans. This is what you'd otherwise type in by hand.</p>
+    <div class="row" style="margin-bottom:12px">
+      <select id="category">
+        <option value="">All categories</option>
+        <option value="meals">Meals</option><option value="travel">Travel</option><option value="lodging">Lodging</option>
+        <option value="office">Office</option><option value="software">Software</option><option value="other">Other</option>
+      </select>
+      <input type="text" id="q" placeholder="Filter by text on the receipt, e.g. Parkside">
+    </div>
+    <div class="scroll" style="max-height:420px;overflow-y:auto">
+      <table>
+        <thead><tr><th>Date</th><th>Merchant</th><th>Category</th><th class="num">Amount</th><th>Currency</th><th>Receipt</th></tr></thead>
+        <tbody id="rows"><tr><td colspan="6" class="empty">Lines appear here as receipts are read.</td></tr></tbody>
+        <tfoot><tr><td colspan="3" id="row-count" class="muted" style="font-weight:400"></td><td class="num" id="row-total"></td><td colspan="2"></td></tr></tfoot>
+      </table>
+    </div>
+  </section>
+
+  <section class="wide">
+    <h2><span class="step">4</span>Ask about your expenses</h2>
+    <p class="hint">Pick a question, or type your own and the AI assistant will answer it from your receipts.</p>
+    <div class="chips" id="chips"></div>
+    <div id="chat"></div>
+    <form class="row" id="ask-form">
+      <input type="text" id="ask" placeholder="e.g. How much did I spend at Bistro Verde?" autocomplete="off">
+      <button class="primary" type="submit">Ask</button>
+    </form>
+  </section>
+
+  <section class="wide" id="detail" hidden>
+    <div class="row" style="justify-content:space-between;margin-bottom:8px">
+      <h2 style="margin:0" id="detail-title"></h2>
+      <button id="detail-close">Close</button>
+    </div>
+    <div id="detail-body"></div>
+  </section>
+</main>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const money = (v) => (typeof v === 'number' ? '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : v ?? '—');
+let selectedDoc = null;
+
+function setStatus(msg, isError = false) {
+  $('#status').textContent = msg;
+  $('#status').className = isError ? 'error' : '';
+}
+
+// ---- 1. upload ---------------------------------------------------------------
+async function upload(name, body) {
+  setStatus(`Uploading ${name}…`);
+  try {
+    const res = await fetch(`/documents?filename=${encodeURIComponent(name)}`, { method: 'POST', body });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    setStatus(`Uploaded ${name}. Its receipts will appear in the expense report as they're read.`);
+    refresh();
+  } catch (err) {
+    setStatus(`Upload failed: ${err.message}. Is the server running?`, true);
+  }
+}
+
+document.querySelectorAll('[data-sample]').forEach((btn) =>
+  btn.addEventListener('click', async () => {
+    const name = btn.dataset.sample;
+    const res = await fetch(`/samples/${name}`);
+    if (!res.ok) return setStatus('Sample files not found. Run "npm run samples" in the repo first.', true);
+    upload(name, await res.blob());
+  }),
+);
+$('#file').addEventListener('change', (e) => {
+  const f = e.target.files[0];
+  if (f) upload(f.name, f);
+  e.target.value = '';
+});
+const drop = $('#drop');
+drop.addEventListener('dragover', (e) => { e.preventDefault(); drop.classList.add('over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('over'));
+drop.addEventListener('drop', (e) => {
+  e.preventDefault();
+  drop.classList.remove('over');
+  const f = e.dataTransfer.files[0];
+  if (f) upload(f.name, f);
+});
+
+// ---- 2. uploaded files ------------------------------------------------------
+async function refreshDocs() {
+  let docs;
+  try {
+    docs = await (await fetch('/documents')).json();
+  } catch {
+    $('#docs').innerHTML = '<tr><td colspan="7" class="empty" style="color:var(--failed)">Cannot reach the server. Is <span class="mono">npm start</span> running?</td></tr>';
+    return;
+  }
+  docs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  $('#docs').innerHTML = docs.length
+    ? docs.map((d) => `
+      <tr data-doc="${esc(d.id)}" class="${d.id === selectedDoc?.id && selectedDoc.page == null ? 'selected' : ''}">
+        <td>${esc(d.filename)}</td>
+        <td><span class="badge ${esc(d.status)}">${esc(d.status)}</span>${d.error ? `<div class="err">⚠ ${esc(d.error)}</div>` : ''}</td>
+        <td>${esc(d.progress ?? '—')}</td>
+        <td class="num">${esc(d.pageCount)}</td>
+        <td class="muted">${new Date(d.createdAt).toLocaleTimeString()}</td>
+        <td class="mono muted">${esc(d.id.slice(0, 8))}</td>
+        <td><button data-retry="${esc(d.id)}">Retry</button></td>
+      </tr>`).join('')
+    : '<tr><td colspan="7" class="empty">Nothing uploaded yet. Try a sample scan above.</td></tr>';
+}
+
+$('#docs').addEventListener('click', async (e) => {
+  const retryId = e.target.closest('[data-retry]')?.dataset.retry;
+  if (retryId) {
+    await fetch(`/documents/${retryId}/retry`, { method: 'POST' }).catch(() => {});
+    return refresh();
+  }
+  const id = e.target.closest('tr[data-doc]')?.dataset.doc;
+  if (id) showDetail(id, null, true);
+});
+
+// ---- 3. expense report -------------------------------------------------
+async function refreshRows() {
+  const params = new URLSearchParams();
+  if ($('#q').value.trim()) params.set('q', $('#q').value.trim());
+  if ($('#category').value) params.set('category', $('#category').value);
+  let rows;
+  try {
+    rows = await (await fetch(`/search?${params}`)).json();
+  } catch {
+    return;
+  }
+  const filtered = params.toString() !== '';
+  $('#rows').innerHTML = rows.length
+    ? rows.slice(0, 500).map((r) => `
+      <tr data-doc="${esc(r.documentId)}" data-page="${esc(r.pageNumber)}">
+        <td>${esc(r.date ?? '—')}</td>
+        <td>${esc(r.merchant ?? '—')}</td>
+        <td><span class="type">${esc(r.category)}</span></td>
+        <td class="num">${esc(money(r.total))}</td>
+        <td class="muted">${esc(r.currency ?? '—')}</td>
+        <td class="muted">${esc(r.filename)} · p.${esc(r.pageNumber)}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="6" class="empty">${filtered ? 'No lines match this filter.' : 'Lines appear here as receipts are read.'}</td></tr>`;
+  const sum = rows.reduce((acc, r) => acc + (typeof r.total === 'number' ? r.total : 0), 0);
+  $('#row-count').textContent = rows.length ? `${rows.length} receipt(s)` : '';
+  $('#row-total').textContent = rows.length ? `To reimburse ${money(sum)}` : '';
+}
+
+$('#rows').addEventListener('click', (e) => {
+  const tr = e.target.closest('tr[data-doc]');
+  if (tr) showDetail(tr.dataset.doc, Number(tr.dataset.page), true);
+});
+$('#category').addEventListener('change', refreshRows);
+let typing;
+$('#q').addEventListener('input', () => {
+  clearTimeout(typing);
+  typing = setTimeout(refreshRows, 250);
+});
+
+// ---- detail ----------------------------------------------------------------------
+async function showDetail(docId, pageNumber, scroll) {
+  selectedDoc = { id: docId, page: pageNumber };
+  const res = await fetch(`/documents/${docId}`).catch(() => null);
+  if (!res || !res.ok) return;
+  const doc = await res.json();
+  const pages = pageNumber == null ? doc.pages : doc.pages.filter((p) => p.pageNumber === pageNumber);
+  $('#detail').hidden = false;
+  $('#detail-title').innerHTML = pageNumber == null
+    ? `${esc(doc.filename)} <span class="badge ${esc(doc.status)}">${esc(doc.status)}</span> <span class="muted" style="font-weight:400;font-size:13px">${doc.pages.length} receipt(s) read</span>`
+    : `${esc(doc.filename)} · page ${esc(pageNumber)}`;
+  const docError = doc.error && pageNumber == null ? `<p class="err" style="max-width:none">⚠ Error while reading this scan: ${esc(doc.error)}</p>` : '';
+  $('#detail-body').innerHTML = docError + (pages.length
+    ? pages.map((p) => `
+      <div style="padding:10px 0;border-top:1px solid var(--border)">
+        <div class="row"><strong>Page ${esc(p.pageNumber)}</strong><span class="type">${esc(p.category)}</span><span>${esc(p.merchant)}</span></div>
+        <div class="page-facts">
+          <div class="fact"><small>Merchant</small>${esc(p.merchant ?? '—')}</div>
+          <div class="fact"><small>Date</small>${esc(p.date ?? '—')}</div>
+          <div class="fact"><small>Amount</small>${esc(money(p.total))} ${esc(p.currency ?? '')}</div>
+          <div class="fact"><small>LLM confidence</small>${esc(p.confidence)}</div>
+        </div>
+        <pre>${esc(p.text)}</pre>
+      </div>`).join('')
+    : '<p class="empty">No receipts read yet.</p>');
+  if (scroll) $('#detail').scrollIntoView({ behavior: 'smooth' });
+}
+
+$('#detail-close').addEventListener('click', () => {
+  selectedDoc = null;
+  $('#detail').hidden = true;
+  refreshDocs();
+});
+
+// ---- 4. assistant -----------------------------------------------------------
+// Answers use **bold** for amounts, so turn that into <b>.
+const formatAnswer = (text) => text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+
+function addMessage(kind, html, note) {
+  const div = document.createElement('div');
+  div.className = `msg ${kind}`;
+  div.innerHTML = html + (note ? `<small>${esc(note)}</small>` : '');
+  $('#chat').append(div);
+  $('#chat').scrollTop = $('#chat').scrollHeight;
+  return div;
+}
+
+async function askQuestion(question) {
+  addMessage('q', esc(question));
+  const pending = addMessage('a', '…');
+  try {
+    const res = await fetch('/ask', { method: 'POST', body: JSON.stringify({ question }) });
+    const { answer, source } = await res.json();
+    pending.innerHTML = formatAnswer(answer) + `<small>${source === 'llm' ? 'AI assistant' : source === 'report' ? 'From your expense report' : 'Error'}</small>`;
+    if (source === 'error') pending.classList.add('error');
+  } catch (err) {
+    pending.classList.add('error');
+    pending.textContent = `Couldn't get an answer: ${err.message}`;
+  }
+}
+
+fetch('/questions').then((r) => r.json()).then((questions) => {
+  $('#chips').innerHTML = questions.map((q) => `<button type="button" data-q="${esc(q)}">${esc(q)}</button>`).join('');
+}).catch(() => {});
+$('#chips').addEventListener('click', (e) => {
+  const q = e.target.closest('[data-q]')?.dataset.q;
+  if (q) askQuestion(q);
+});
+$('#ask-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const q = $('#ask').value.trim();
+  if (!q) return;
+  $('#ask').value = '';
+  askQuestion(q);
+});
+
+function refresh() {
+  refreshDocs();
+  refreshRows();
+  if (selectedDoc) showDetail(selectedDoc.id, selectedDoc.page, false);
+}
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
