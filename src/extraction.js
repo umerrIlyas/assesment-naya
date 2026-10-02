@@ -128,26 +128,36 @@ export async function extractPage(fullText) {
     issues.push('Page is unusually long; only the beginning was read');
   }
 
-  // Formatting glitches (truncated output, prose) are random: one retry fixes most.
-  let parsed = null;
-  for (let attempt = 1; attempt <= 2 && !parsed; attempt++) {
+  // The model's output is noisy (truncated JSON, prose, dropped fields) but the
+  // noise is random, so another attempt or two fixes it. Keep the better result.
+  // Issues that come from the receipt itself (injection, amount not printed)
+  // would not change on retry, so they don't trigger one.
+  const RECEIPT_ISSUES = new Set(['Amount does not appear on the receipt', 'Receipt contains instructions aimed at an AI; check the amount by hand']);
+  let best = null;
+  let unreadable = false;
+  for (let attempt = 1; attempt <= 3; attempt++) {
     let reply;
     try {
       reply = await extractReceipt(text);
     } catch (err) {
       if (err.fatal) throw err;
+      if (best) break;
       return { status: 'failed', issues: [...issues, 'The AI service was unavailable for this receipt. Retry the scan.'] };
     }
-    if (reply.stopReason === 'max_tokens') continue;
-    parsed = parseJsonObject(reply.text);
-    if (!parsed && !reply.text.includes('{')) break; // model says it cannot read the page; retrying won't help
+    const parsed = reply.stopReason === 'max_tokens' ? null : parseJsonObject(reply.text);
+    if (!parsed) {
+      if (!reply.text.includes('{')) unreadable = true; // model says it cannot read the page
+      if (unreadable) break;
+      continue;
+    }
+    const line = normalise(parsed, text);
+    if (!best || line.issues.length < best.issues.length) best = line;
+    if (best.issues.every((i) => RECEIPT_ISSUES.has(i))) break;
   }
 
-  if (!parsed) {
+  if (!best) {
     return { status: 'needs_review', issues: [...issues, 'This receipt could not be read automatically. Enter it by hand.'] };
   }
-
-  const line = normalise(parsed, text);
-  line.issues = [...issues, ...line.issues];
-  return { status: line.issues.length ? 'needs_review' : 'ok', ...line };
+  best.issues = [...issues, ...best.issues];
+  return { status: best.issues.length ? 'needs_review' : 'ok', ...best };
 }

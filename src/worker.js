@@ -71,13 +71,19 @@ async function processDocument(job) {
     }
     db.setPageCount(job.id, pages.length);
 
+    // A few pages in flight per document, so one slow LLM call doesn't stall the
+    // scan. The shared rate limiter in llm.js keeps the total request rate in check.
     const done = db.processedPageNumbers(job.id);
-    for (const page of pages) {
-      if (done.has(page.pageNumber)) continue;
-      if (stopping) return; // left as 'processing'; requeued and resumed on next start
-      const result = await extractPage(page.text);
-      db.savePage(job.id, { pageNumber: page.pageNumber, text: page.text, ...result });
-    }
+    const todo = pages.filter((p) => !done.has(p.pageNumber));
+    const lane = async () => {
+      while (todo.length && !stopping) {
+        const page = todo.shift();
+        const result = await extractPage(page.text);
+        db.savePage(job.id, { pageNumber: page.pageNumber, text: page.text, ...result });
+      }
+    };
+    await Promise.all(Array.from({ length: config.pageConcurrency }, lane));
+    if (stopping) return; // left as 'processing'; requeued and resumed on next start
 
     db.finishDocument(job.id, { status: 'done' });
     log.info('document processed', { documentId: job.id, pages: pages.length, ms: Date.now() - started });

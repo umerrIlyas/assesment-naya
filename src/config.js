@@ -33,6 +33,7 @@ const config = {
 
   // Worker / LLM.
   workerConcurrency: num('WORKER_CONCURRENCY', 4), // documents processed at once
+  pageConcurrency: num('PAGE_CONCURRENCY', 3), // LLM calls in flight per document
   llmRps: num('LLM_RPS', 6), // provider limit is 8 req/s per key; keep headroom
   llmTimeoutMs: num('LLM_TIMEOUT_MS', 30_000),
   llmMaxAttempts: num('LLM_MAX_ATTEMPTS', 5),
