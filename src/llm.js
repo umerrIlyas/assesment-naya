@@ -17,7 +17,6 @@ Receipt:
 `;
 
 async function callLLM(system, messages, maxTokens) {
-  console.log('calling LLM with key', config.llmApiKey);
 
   const res = await fetch(config.llmUrl, {
     method: 'POST',

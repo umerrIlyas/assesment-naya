@@ -2,11 +2,12 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import config from './config.js';
+import config, { assertConfig } from './config.js';
 import * as db from './db.js';
 import { enqueue, startWorker } from './worker.js';
 import { ask, SUGGESTED } from './assistant.js';
 
+assertConfig();
 fs.mkdirSync(config.uploadDir, { recursive: true });
 
 function send(res, status, body) {
