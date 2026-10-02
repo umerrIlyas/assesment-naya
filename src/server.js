@@ -146,7 +146,7 @@ const routes = [
     send(res, 200, db.searchLines(user.id, { q, category }).map(toPublicLine));
   }],
 
-  ['GET', /^\/questions$/, {}, (req, res) => {
+  ['GET', /^\/questions$/, { public: true }, (req, res) => {
     send(res, 200, Object.keys(SUGGESTED));
   }],
 

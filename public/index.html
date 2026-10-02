@@ -74,6 +74,9 @@
   .msg.q { justify-self: end; background: var(--accent); color: var(--accent-text); }
   .msg.a { justify-self: start; background: var(--bg); }
   .msg.a.error { color: var(--failed); }
+  .review { color: var(--processing); font-size: 12px; }
+  #auth { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; }
+  #auth input { flex: 1; max-width: 360px; }
   .msg small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
 </style>
 </head>
@@ -81,6 +84,11 @@
 <header>
   <h1>ReceiptBox</h1>
   <p>Scan your trip receipts into one file, upload it, and get your expense report filled in for you.</p>
+  <form id="auth">
+    <span id="auth-label" class="muted">Your API token:</span>
+    <input type="password" id="token" placeholder="rb_…  (npm run create-user)" autocomplete="off">
+    <button type="submit" id="auth-btn">Sign in</button>
+  </form>
 </header>
 
 <main>
@@ -163,8 +171,45 @@
 <script>
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const money = (v) => (typeof v === 'number' ? '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : v ?? '—');
+const money = (v, currency = 'USD') => {
+  if (typeof v !== 'number') return '—';
+  try { return v.toLocaleString(undefined, { style: 'currency', currency }); } catch { return `${v.toFixed(2)} ${currency}`; }
+};
 let selectedDoc = null;
+
+// ---- auth --------------------------------------------------------------------
+// Each employee has an API token. It is kept in this browser only.
+const store = {
+  get: () => { try { return localStorage.getItem('rb_token') || ''; } catch { return ''; } },
+  set: (t) => { try { t ? localStorage.setItem('rb_token', t) : localStorage.removeItem('rb_token'); } catch {} },
+};
+let token = store.get();
+function renderAuth() {
+  $('#token').hidden = !!token;
+  $('#auth-label').textContent = token ? 'Signed in.' : 'Your API token:';
+  $('#auth-btn').textContent = token ? 'Sign out' : 'Sign in';
+}
+$('#auth').addEventListener('submit', (e) => {
+  e.preventDefault();
+  token = token ? '' : $('#token').value.trim();
+  store.set(token);
+  $('#token').value = '';
+  renderAuth();
+  refresh();
+});
+renderAuth();
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { ...options, headers: { ...options.headers, authorization: `Bearer ${token}` } });
+  if (res.status === 401) {
+    token = '';
+    store.set('');
+    renderAuth();
+    throw new Error('Please sign in with your API token');
+  }
+  return res;
+}
+const errorMessage = async (res) => { try { return (await res.json()).error || `HTTP ${res.status}`; } catch { return `HTTP ${res.status}`; } };
 
 function setStatus(msg, isError = false) {
   $('#status').textContent = msg;
@@ -175,12 +220,12 @@ function setStatus(msg, isError = false) {
 async function upload(name, body) {
   setStatus(`Uploading ${name}…`);
   try {
-    const res = await fetch(`/documents?filename=${encodeURIComponent(name)}`, { method: 'POST', body });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const res = await api(`/documents?filename=${encodeURIComponent(name)}`, { method: 'POST', body });
+    if (!res.ok) throw new Error(await errorMessage(res));
     setStatus(`Uploaded ${name}. Its receipts will appear in the expense report as they're read.`);
     refresh();
   } catch (err) {
-    setStatus(`Upload failed: ${err.message}. Is the server running?`, true);
+    setStatus(`Upload failed: ${err.message}`, true);
   }
 }
 
@@ -211,9 +256,11 @@ drop.addEventListener('drop', (e) => {
 async function refreshDocs() {
   let docs;
   try {
-    docs = await (await fetch('/documents')).json();
-  } catch {
-    $('#docs').innerHTML = '<tr><td colspan="7" class="empty" style="color:var(--failed)">Cannot reach the server. Is <span class="mono">npm start</span> running?</td></tr>';
+    const res = await api('/documents');
+    if (!res.ok) throw new Error(await errorMessage(res));
+    docs = await res.json();
+  } catch (err) {
+    $('#docs').innerHTML = `<tr><td colspan="7" class="empty" style="color:var(--failed)">${esc(err.message)}</td></tr>`;
     return;
   }
   docs.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
@@ -221,7 +268,7 @@ async function refreshDocs() {
     ? docs.map((d) => `
       <tr data-doc="${esc(d.id)}" class="${d.id === selectedDoc?.id && selectedDoc.page == null ? 'selected' : ''}">
         <td>${esc(d.filename)}</td>
-        <td><span class="badge ${esc(d.status)}">${esc(d.status)}</span>${d.error ? `<div class="err">⚠ ${esc(d.error)}</div>` : ''}</td>
+        <td><span class="badge ${esc(d.status)}">${esc(d.status)}</span>${d.error ? `<div class="err">⚠ ${esc(d.error)}</div>` : ''}${d.needsReview ? `<div class="review">${esc(d.needsReview)} need review</div>` : ''}${d.failedPages ? `<div class="err">${esc(d.failedPages)} could not be read</div>` : ''}</td>
         <td>${esc(d.progress ?? '—')}</td>
         <td class="num">${esc(d.pageCount)}</td>
         <td class="muted">${new Date(d.createdAt).toLocaleTimeString()}</td>
@@ -234,7 +281,12 @@ async function refreshDocs() {
 $('#docs').addEventListener('click', async (e) => {
   const retryId = e.target.closest('[data-retry]')?.dataset.retry;
   if (retryId) {
-    await fetch(`/documents/${retryId}/retry`, { method: 'POST' }).catch(() => {});
+    try {
+      const res = await api(`/documents/${encodeURIComponent(retryId)}/retry`, { method: 'POST' });
+      if (!res.ok) setStatus(await errorMessage(res), true);
+    } catch (err) {
+      setStatus(err.message, true);
+    }
     return refresh();
   }
   const id = e.target.closest('tr[data-doc]')?.dataset.doc;
@@ -248,7 +300,9 @@ async function refreshRows() {
   if ($('#category').value) params.set('category', $('#category').value);
   let rows;
   try {
-    rows = await (await fetch(`/search?${params}`)).json();
+    const res = await api(`/search?${params}`);
+    if (!res.ok) return;
+    rows = await res.json();
   } catch {
     return;
   }
@@ -257,16 +311,19 @@ async function refreshRows() {
     ? rows.slice(0, 500).map((r) => `
       <tr data-doc="${esc(r.documentId)}" data-page="${esc(r.pageNumber)}">
         <td>${esc(r.date ?? '—')}</td>
-        <td>${esc(r.merchant ?? '—')}</td>
+        <td>${esc(r.merchant ?? '—')}${r.status !== 'ok' ? `<div class="review" title="${esc(r.issues.join('\n'))}">⚠ ${r.status === 'failed' ? 'could not be read' : 'needs review'}: ${esc(r.issues[0] ?? '')}</div>` : ''}</td>
         <td><span class="type">${esc(r.category)}</span></td>
-        <td class="num">${esc(money(r.total))}</td>
+        <td class="num">${esc(money(r.total, r.currency ?? 'USD'))}</td>
         <td class="muted">${esc(r.currency ?? '—')}</td>
         <td class="muted">${esc(r.filename)} · p.${esc(r.pageNumber)}</td>
       </tr>`).join('')
     : `<tr><td colspan="6" class="empty">${filtered ? 'No lines match this filter.' : 'Lines appear here as receipts are read.'}</td></tr>`;
-  const sum = rows.reduce((acc, r) => acc + (typeof r.total === 'number' ? r.total : 0), 0);
-  $('#row-count').textContent = rows.length ? `${rows.length} receipt(s)` : '';
-  $('#row-total').textContent = rows.length ? `To reimburse ${money(sum)}` : '';
+  // Only lines read cleanly count; currencies are never added together.
+  const sums = {};
+  for (const r of rows) if (r.status === 'ok' && r.totalCents != null && r.currency) sums[r.currency] = (sums[r.currency] ?? 0) + r.totalCents;
+  const review = rows.filter((r) => r.status !== 'ok').length;
+  $('#row-count').textContent = rows.length ? `${rows.length} receipt(s)${review ? ` · ${review} need review (not included)` : ''}` : '';
+  $('#row-total').textContent = rows.length ? `To reimburse ${Object.entries(sums).map(([c, cents]) => money(cents / 100, c)).join(' + ') || money(0)}` : '';
 }
 
 $('#rows').addEventListener('click', (e) => {
@@ -283,7 +340,7 @@ $('#q').addEventListener('input', () => {
 // ---- detail ----------------------------------------------------------------------
 async function showDetail(docId, pageNumber, scroll) {
   selectedDoc = { id: docId, page: pageNumber };
-  const res = await fetch(`/documents/${docId}`).catch(() => null);
+  const res = await api(`/documents/${encodeURIComponent(docId)}`).catch(() => null);
   if (!res || !res.ok) return;
   const doc = await res.json();
   const pages = pageNumber == null ? doc.pages : doc.pages.filter((p) => p.pageNumber === pageNumber);
@@ -295,12 +352,13 @@ async function showDetail(docId, pageNumber, scroll) {
   $('#detail-body').innerHTML = docError + (pages.length
     ? pages.map((p) => `
       <div style="padding:10px 0;border-top:1px solid var(--border)">
-        <div class="row"><strong>Page ${esc(p.pageNumber)}</strong><span class="type">${esc(p.category)}</span><span>${esc(p.merchant)}</span></div>
+        <div class="row"><strong>Page ${esc(p.pageNumber)}</strong><span class="type">${esc(p.category ?? '—')}</span><span>${esc(p.merchant ?? '')}</span></div>
+        ${p.issues.length ? `<div class="review">⚠ ${p.issues.map(esc).join('<br>⚠ ')}</div>` : ''}
         <div class="page-facts">
           <div class="fact"><small>Merchant</small>${esc(p.merchant ?? '—')}</div>
           <div class="fact"><small>Date</small>${esc(p.date ?? '—')}</div>
-          <div class="fact"><small>Amount</small>${esc(money(p.total))} ${esc(p.currency ?? '')}</div>
-          <div class="fact"><small>LLM confidence</small>${esc(p.confidence)}</div>
+          <div class="fact"><small>Amount</small>${esc(money(p.total, p.currency ?? 'USD'))}</div>
+          <div class="fact"><small>LLM confidence</small>${esc(p.confidence ?? '—')}</div>
         </div>
         <pre>${esc(p.text)}</pre>
       </div>`).join('')
@@ -315,8 +373,8 @@ $('#detail-close').addEventListener('click', () => {
 });
 
 // ---- 4. assistant -----------------------------------------------------------
-// Answers use **bold** for amounts, so turn that into <b>.
-const formatAnswer = (text) => text.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+// Answers use **bold** for amounts. Escape first: answers can contain LLM output.
+const formatAnswer = (text) => esc(text).replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
 
 function addMessage(kind, html, note) {
   const div = document.createElement('div');
@@ -331,7 +389,8 @@ async function askQuestion(question) {
   addMessage('q', esc(question));
   const pending = addMessage('a', '…');
   try {
-    const res = await fetch('/ask', { method: 'POST', body: JSON.stringify({ question }) });
+    const res = await api('/ask', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question }) });
+    if (!res.ok) throw new Error(await errorMessage(res));
     const { answer, source } = await res.json();
     pending.innerHTML = formatAnswer(answer) + `<small>${source === 'llm' ? 'AI assistant' : source === 'report' ? 'From your expense report' : 'Error'}</small>`;
     if (source === 'error') pending.classList.add('error');
@@ -357,6 +416,10 @@ $('#ask-form').addEventListener('submit', (e) => {
 });
 
 function refresh() {
+  if (!token) {
+    $('#docs').innerHTML = '<tr><td colspan="7" class="empty">Sign in with your API token above.</td></tr>';
+    return;
+  }
   refreshDocs();
   refreshRows();
   if (selectedDoc) showDetail(selectedDoc.id, selectedDoc.page, false);

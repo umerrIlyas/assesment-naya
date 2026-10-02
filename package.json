@@ -12,6 +12,7 @@
     "llm-sandbox": "node vendor/llm-sandbox/server.js",
     "samples": "node scripts/make-samples.js",
     "demo": "node scripts/demo.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "create-user": "node --disable-warning=ExperimentalWarning scripts/create-user.js"
   }
 }
