@@ -5,13 +5,13 @@
   "type": "module",
   "private": true,
   "engines": {
-    "node": ">=20"
+    "node": ">=22.13"
   },
   "scripts": {
-    "start": "node src/server.js",
+    "start": "node --disable-warning=ExperimentalWarning src/server.js",
     "llm-sandbox": "node vendor/llm-sandbox/server.js",
     "samples": "node scripts/make-samples.js",
     "demo": "node scripts/demo.js",
-    "test": "node --test test/"
+    "test": "node --test test/*.test.js"
   }
 }

@@ -1,56 +1,90 @@
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import config from './config.js';
 import * as db from './db.js';
-import { extractReceipt } from './llm.js';
+import { extractPage } from './extraction.js';
+import { log } from './log.js';
 
-const queue = [];
+// Background worker. The queue lives in the database (documents with status
+// 'pending'), so nothing is lost on restart: documents that were mid-flight are
+// put back in the queue on startup, and pages already saved are skipped.
+
 let running = 0;
-
-export function enqueue(documentId) {
-  queue.push(documentId);
-}
+let stopping = false;
+let timer;
 
 export function startWorker() {
-  setInterval(() => {
-    while (running < config.workerConcurrency && queue.length > 0) {
-      const id = queue.shift();
-      running++;
-      processDocument(id).finally(() => running--);
-    }
-  }, 500);
+  const recovered = db.requeueInterrupted();
+  if (recovered) log.info('requeued interrupted documents', { count: recovered });
+  stopping = false;
+  timer = setInterval(pump, 1000); // safety net; notify() is the fast path
+  pump();
 }
 
-async function processDocument(id) {
-  const data = db.load();
-  const doc = data.documents[id];
-  doc.status = 'processing';
-  db.save(data);
+/** Wake the worker after enqueueing, instead of waiting for the next tick. */
+export function notify() {
+  setImmediate(pump);
+}
 
-  try {
-    const text = fs.readFileSync(doc.filePath, 'utf8');
-    const pages = text.split('\f');
+/** Stop claiming new work and wait (bounded) for in-flight documents to pause. */
+export async function stopWorker(timeoutMs = 10_000) {
+  stopping = true;
+  clearInterval(timer);
+  const deadline = Date.now() + timeoutMs;
+  while (running > 0 && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+}
 
-    for (let i = 0; i < pages.length; i++) {
-      const pageText = pages[i].trim();
-      if (!pageText) continue;
-
-      const result = await extractReceipt(pageText);
-
-      doc.pages.push({
-        pageNumber: doc.pages.length + 1,
-        text: pageText,
-        ...result,
+function pump() {
+  while (!stopping && running < config.workerConcurrency) {
+    const job = db.claimNextDocument();
+    if (!job) return;
+    running++;
+    processDocument(job)
+      .catch((err) => log.error('document processing crashed', { documentId: job.id, error: err.message }))
+      .finally(() => {
+        running--;
+        if (!stopping) pump();
       });
-      doc.progress = `${i + 1}/${pages.length}`;
-      db.save(data);
+  }
+}
+
+/** Split a scan into non-blank pages, keeping each page's position in the scan. */
+export function splitPages(text) {
+  return text
+    .split('\f')
+    .map((raw, i) => ({ pageNumber: i + 1, text: raw.trim() }))
+    .filter((p) => p.text.length > 0);
+}
+
+async function processDocument(job) {
+  const started = Date.now();
+  try {
+    let text;
+    try {
+      text = new TextDecoder('utf-8', { fatal: true }).decode(await fs.readFile(job.filePath));
+    } catch (err) {
+      if (err.code !== 'ERR_ENCODING_INVALID_ENCODED_DATA') throw err;
+      return db.finishDocument(job.id, { status: 'failed', error: 'This file is not a text scan from the scanning app.' });
+    }
+    const pages = splitPages(text);
+    if (pages.length > config.maxPages) {
+      return db.finishDocument(job.id, { status: 'failed', error: `This scan has ${pages.length} receipts; the limit is ${config.maxPages}. Split it into smaller files.` });
+    }
+    db.setPageCount(job.id, pages.length);
+
+    const done = db.processedPageNumbers(job.id);
+    for (const page of pages) {
+      if (done.has(page.pageNumber)) continue;
+      if (stopping) return; // left as 'processing'; requeued and resumed on next start
+      const result = await extractPage(page.text);
+      db.savePage(job.id, { pageNumber: page.pageNumber, text: page.text, ...result });
     }
 
-    doc.status = 'done';
-    db.save(data);
-    console.log('finished document', id);
+    db.finishDocument(job.id, { status: 'done' });
+    log.info('document processed', { documentId: job.id, pages: pages.length, ms: Date.now() - started });
   } catch (err) {
-    console.log('error processing document', id, err.message);
-    doc.error = err.message; // shown next to the scan in the UI
-    db.save(data);
+    // Shown to the employee, so keep it generic; details go to the log.
+    const error = err.code === 'ENOENT' ? 'The uploaded file is missing. Please upload it again.' : 'We could not read this scan. Please retry.';
+    db.finishDocument(job.id, { status: 'failed', error });
+    log.error('document failed', { documentId: job.id, error: err.message });
   }
 }
