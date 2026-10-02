@@ -61,6 +61,13 @@ Priority = (harm to a customer) × (likelihood next week). Wrong money and leake
    - Failed logins are rate-limited per email and per IP.
    - Writes made with a cookie must come from the same origin (CSRF protection).
    - API tokens remain available for scripts.
+8. **Saved, streaming assistant chat.**
+   - The conversation used to live only in the page, so a refresh lost it, and follow-up context was lost on every server restart.
+   - Each exchange is now saved in SQLite (last 200 per user) and loaded at login, and the LLM's follow-up context is read from there.
+   - Answers stream to the browser as server-sent events.
+   - The LLM client reads the provider's streaming format, and falls back to one chunk when the provider answers in one piece. **The vendor sandbox ignores `stream: true`, so with it answers still arrive in one go**; streaming is verified against a fake streaming provider in the tests.
+   - A stream that fails before any text is retried; once text has been shown it isn't retried, so the user never sees it repeated.
+   - If the browser disconnects, the LLM call is cancelled.
 
 **Breaking API changes:**
 - All data routes need a login session or `Authorization: Bearer <token>`. New `/auth/*` routes.
@@ -92,7 +99,7 @@ Priority = (harm to a customer) × (likelihood next week). Wrong money and leake
 
 ## How I verified it
 
-- **`npm test`: 31 tests.**
+- **`npm test`: 38 tests.**
   - Storage and queue semantics.
   - Every reply format the sandbox produces.
   - The LLM client against a scripted fake: 429 with `retry-after`, a hung request, giving up, no retry on 4xx.
@@ -104,6 +111,7 @@ Priority = (harm to a customer) × (likelihood next week). Wrong money and leake
     - identical answers for a wrong password and an unknown email
     - cross-site writes blocked
     - the login rate limit
+  - Chat: saved per user, loaded back, cleared without touching other users; streamed deltas add up to the saved answer. LLM streaming against a fake provider: deltas, fallback, retry before text but not after, abort.
     - bad input and upload limits
     - path traversal
     - correct line counts and page numbers

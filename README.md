@@ -97,7 +97,9 @@ All routes except `/`, `/health`, `/samples/*`, `/questions` and `/auth/signup|l
 | `POST` | `/documents/:id/retry` | Re-process a scan (replaces its lines). `409` while it is still processing. |
 | `GET` | `/search?q=text&category=meals` | Your expense report lines, optionally filtered (filters combine; text search is case-insensitive). |
 | `GET` | `/questions` | Suggested questions for the assistant. |
-| `POST` | `/ask` | Ask the assistant. Body: `{"question": "..."}`. Returns `{answer, source}`, where `source` is `report`, `llm` or `error`. |
+| `POST` | `/ask` | Ask the assistant. Body: `{"question": "..."}`. Returns `{answer, source, message}`, where `source` is `report`, `llm` or `error`. With `Accept: text/event-stream` the answer streams as server-sent events: `delta` events (`{"text"}`), then one `done` event with the full result. |
+| `GET` | `/chat` | The saved assistant conversation (last 200 exchanges), oldest first. |
+| `DELETE` | `/chat` | Clear the conversation. |
 | `GET` | `/health` | Liveness/readiness check. |
 | `POST` | `/auth/signup` | `{"name", "email", "password"}` (password ≥ 10 chars). Creates the account and logs in (sets the session cookie). `409` if the email is taken. |
 | `POST` | `/auth/login` | `{"email", "password"}`. Sets the session cookie. `401` on wrong credentials, `429` after repeated failures. |

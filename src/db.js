@@ -27,6 +27,17 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
 
+-- One row per question/answer exchange with the assistant.
+CREATE TABLE IF NOT EXISTS chat_messages (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  question    TEXT NOT NULL,
+  answer      TEXT NOT NULL,
+  source      TEXT NOT NULL CHECK (source IN ('report', 'llm', 'error')),
+  created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS chat_messages_user ON chat_messages(user_id, id);
+
 CREATE TABLE IF NOT EXISTS documents (
   id               TEXT PRIMARY KEY,
   user_id          TEXT NOT NULL REFERENCES users(id),
@@ -275,6 +286,40 @@ export function searchLines(userId, { q, category, limit = 1000 } = {}) {
     )
     .all(...args)
     .map(hydrate);
+}
+
+// ---- assistant chat ----------------------------------------------------------
+
+export const CHAT_HISTORY_LIMIT = 200; // exchanges kept per user
+
+export function addChatMessage(userId, { question, answer, source }) {
+  return tx(() => {
+    const row = db
+      .prepare(
+        `INSERT INTO chat_messages (user_id, question, answer, source, created_at) VALUES (?, ?, ?, ?, ?)
+         RETURNING id, question, answer, source, created_at AS createdAt`,
+      )
+      .get(userId, question, answer, source, now());
+    db.prepare(
+      `DELETE FROM chat_messages WHERE user_id = ? AND id NOT IN
+         (SELECT id FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?)`,
+    ).run(userId, userId, CHAT_HISTORY_LIMIT);
+    return row;
+  });
+}
+
+/** The user's most recent exchanges, oldest first. */
+export function listChatMessages(userId, limit = CHAT_HISTORY_LIMIT) {
+  return db
+    .prepare(
+      `SELECT id, question, answer, source, created_at AS createdAt FROM
+         (SELECT * FROM chat_messages WHERE user_id = ? ORDER BY id DESC LIMIT ?) ORDER BY id`,
+    )
+    .all(userId, limit);
+}
+
+export function clearChat(userId) {
+  return db.prepare('DELETE FROM chat_messages WHERE user_id = ?').run(userId).changes;
 }
 
 export function ping() {

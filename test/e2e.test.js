@@ -155,3 +155,40 @@ test("users cannot see each other's data", async () => {
   const { body } = await json(await call(bob, '/ask', { method: 'POST', body: JSON.stringify({ question: 'How many receipts have I uploaded?' }) }));
   assert.match(body.answer, /\*\*0\*\*/);
 });
+
+test('the assistant conversation is saved per user and survives a reload', async () => {
+  const { body } = await json(await call(alice, '/chat'));
+  const questions = body.messages.map((m) => m.question);
+  assert.ok(questions.includes('What is my total to reimburse?'));
+  assert.ok(questions.includes('How much did I spend at Bistro Verde?'));
+  assert.ok(body.messages.every((m) => m.answer && m.source && m.createdAt));
+  assert.deepEqual((await json(await call(bob, '/chat'))).body.messages.filter((m) => m.question.includes('Bistro')), []);
+});
+
+test('answers stream as server-sent events and are saved', async () => {
+  const res = await call(alice, '/ask', {
+    method: 'POST',
+    headers: { accept: 'text/event-stream' },
+    body: JSON.stringify({ question: 'How much did I spend on travel?' }),
+  });
+  assert.match(res.headers.get('content-type'), /text\/event-stream/);
+  const raw = await res.text();
+  const events = raw.trim().split('\n\n').map((b) => ({ name: /^event: (.*)$/m.exec(b)[1], data: JSON.parse(/^data: (.*)$/m.exec(b)[1]) }));
+  const deltas = events.filter((e) => e.name === 'delta').map((e) => e.data.text).join('');
+  const done = events.at(-1);
+  assert.equal(done.name, 'done');
+  assert.equal(done.data.source, 'llm');
+  assert.equal(deltas, done.data.answer);
+  const saved = (await json(await call(alice, '/chat'))).body.messages.at(-1);
+  assert.equal(saved.question, 'How much did I spend on travel?');
+  assert.equal(saved.answer, done.data.answer);
+});
+
+test('clearing the chat removes only your own history', async () => {
+  await call(bob, '/ask', { method: 'POST', body: JSON.stringify({ question: 'How many receipts have I uploaded?' }) });
+  const bobBefore = (await json(await call(bob, '/chat'))).body.messages.length;
+  assert.ok(bobBefore > 0);
+  assert.equal((await call(alice, '/chat', { method: 'DELETE' })).status, 200);
+  assert.deepEqual((await json(await call(alice, '/chat'))).body.messages, []);
+  assert.equal((await json(await call(bob, '/chat'))).body.messages.length, bobBefore);
+});

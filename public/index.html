@@ -176,7 +176,8 @@
     <div id="chat"></div>
     <form class="row" id="ask-form">
       <input type="text" id="ask" placeholder="e.g. How much did I spend at Bistro Verde?" autocomplete="off">
-      <button class="primary" type="submit">Ask</button>
+      <button class="primary" type="submit" id="ask-btn">Ask</button>
+      <button type="button" id="clear-chat">Clear chat</button>
     </form>
   </section>
 
@@ -222,8 +223,13 @@ function showApp(user) {
   $('main').hidden = !user;
   $('#whoami').hidden = !user;
   $('#whoami-name').textContent = user ? `${user.name}${user.email ? ` (${user.email})` : ''}` : '';
-  if (user) refresh();
-  else $('#auth-email').focus();
+  if (user) {
+    refresh();
+    loadChat();
+  } else {
+    $('#chat').innerHTML = '';
+    $('#auth-email').focus();
+  }
 }
 
 $('#auth-switch').addEventListener('click', () => {
@@ -444,20 +450,90 @@ function addMessage(kind, html, note) {
   return div;
 }
 
-async function askQuestion(question) {
-  addMessage('q', esc(question));
-  const pending = addMessage('a', '…');
+const SOURCE_LABEL = { llm: 'AI assistant', report: 'From your expense report', error: 'Error' };
+
+function renderAnswer(div, answer, source) {
+  div.innerHTML = formatAnswer(answer) + (source ? `<small>${SOURCE_LABEL[source] ?? ''}</small>` : '');
+  div.classList.toggle('error', source === 'error');
+}
+
+// The conversation is stored on the server, so it survives refreshes.
+async function loadChat() {
+  $('#chat').innerHTML = '';
   try {
-    const res = await api('/ask', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ question }) });
-    if (!res.ok) throw new Error(await errorMessage(res));
-    const { answer, source } = await res.json();
-    pending.innerHTML = formatAnswer(answer) + `<small>${source === 'llm' ? 'AI assistant' : source === 'report' ? 'From your expense report' : 'Error'}</small>`;
-    if (source === 'error') pending.classList.add('error');
-  } catch (err) {
-    pending.classList.add('error');
-    pending.textContent = `Couldn't get an answer: ${err.message}`;
+    const res = await api('/chat');
+    if (!res.ok) return;
+    for (const m of (await res.json()).messages) {
+      addMessage('q', esc(m.question));
+      renderAnswer(addMessage('a', ''), m.answer, m.source);
+    }
+  } catch {}
+}
+
+/** Read a server-sent-event stream from a fetch response. */
+async function* readEvents(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buffer += decoder.decode(value, { stream: true });
+    let i;
+    while ((i = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, i);
+      buffer = buffer.slice(i + 2);
+      const name = /^event: (.*)$/m.exec(block)?.[1] ?? 'message';
+      const data = /^data: (.*)$/m.exec(block)?.[1];
+      if (data) yield { name, data: JSON.parse(data) };
+    }
   }
 }
+
+let asking = false;
+async function askQuestion(question) {
+  if (asking) return;
+  asking = true;
+  $('#ask-btn').disabled = true;
+  addMessage('q', esc(question));
+  const pending = addMessage('a', '…');
+  let text = '';
+  try {
+    const res = await api('/ask', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'text/event-stream' },
+      body: JSON.stringify({ question }),
+    });
+    if (!res.ok) throw new Error(await errorMessage(res));
+    let finished = false;
+    for await (const { name, data } of readEvents(res)) {
+      if (name === 'delta') {
+        text += data.text;
+        renderAnswer(pending, text);
+        $('#chat').scrollTop = $('#chat').scrollHeight;
+      } else if (name === 'done') {
+        renderAnswer(pending, data.answer, data.source);
+        finished = true;
+      } else if (name === 'error') {
+        throw new Error(data.message);
+      }
+    }
+    if (!finished) throw new Error('The answer was cut off');
+  } catch (err) {
+    pending.classList.add('error');
+    pending.textContent = `${text ? text + '\n\n' : ''}Couldn't get an answer: ${err.message}`;
+  } finally {
+    asking = false;
+    $('#ask-btn').disabled = false;
+  }
+}
+
+$('#clear-chat').addEventListener('click', async () => {
+  try {
+    const res = await api('/chat', { method: 'DELETE' });
+    if (res.ok) $('#chat').innerHTML = '';
+  } catch {}
+});
 
 fetch('/questions').then((r) => r.json()).then((questions) => {
   $('#chips').innerHTML = questions.map((q) => `<button type="button" data-q="${esc(q)}">${esc(q)}</button>`).join('');

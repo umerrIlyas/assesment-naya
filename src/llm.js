@@ -44,7 +44,8 @@ function retryAfterMs(res) {
   return Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
 }
 
-async function attempt(body) {
+/** Send one request. Resolves with an OK response, or throws an LLMError. */
+async function send(body, signal) {
   let res;
   try {
     res = await fetch(config.llmUrl, {
@@ -55,9 +56,10 @@ async function attempt(body) {
         'anthropic-version': '2023-06-01',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(config.llmTimeoutMs),
+      signal,
     });
   } catch (err) {
+    if (err.name === 'AbortError') throw err; // the caller gave up (e.g. browser disconnected)
     const reason = err.name === 'TimeoutError' ? `timed out after ${config.llmTimeoutMs} ms` : err.message;
     throw new LLMError(`LLM request failed: ${reason}`, { retryable: true });
   }
@@ -75,11 +77,15 @@ async function attempt(body) {
     err.retryAfterMs = retryAfterMs(res);
     throw err;
   }
+  return res;
+}
 
+async function readJsonReply(res) {
   let data;
   try {
     data = await res.json();
-  } catch {
+  } catch (err) {
+    if (err.name === 'AbortError' || err.name === 'TimeoutError') throw err;
     throw new LLMError('LLM provider returned invalid JSON', { retryable: true });
   }
   const text = data?.content?.find?.((c) => c?.type === 'text')?.text;
@@ -87,15 +93,61 @@ async function attempt(body) {
   return { text, stopReason: data.stop_reason };
 }
 
-/** One Messages API call with rate limiting, timeout and retries. */
-export async function callLLM({ system, messages, maxTokens }) {
-  const body = { model: config.model, max_tokens: maxTokens, messages, ...(system && { system }) };
+/** Parse a Messages API server-sent-event stream, calling onText for each text delta. */
+async function readEventStream(res, onText) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let text = '';
+  let stopReason = null;
+  for await (const chunk of res.body) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let boundary;
+    while ((boundary = buffer.indexOf('\n\n')) !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      const data = block
+        .split('\n')
+        .filter((l) => l.startsWith('data:'))
+        .map((l) => l.slice(5).trimStart())
+        .join('\n');
+      if (!data) continue;
+      let event;
+      try {
+        event = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (event.type === 'content_block_delta' && event.delta?.type === 'text_delta') {
+        text += event.delta.text;
+        onText(event.delta.text);
+      } else if (event.type === 'message_delta') {
+        stopReason = event.delta?.stop_reason ?? stopReason;
+      } else if (event.type === 'error') {
+        const type = event.error?.type;
+        throw new LLMError(`LLM provider error: ${event.error?.message ?? 'stream error'}`, {
+          retryable: type === 'overloaded_error' || type === 'api_error' || type === 'rate_limit_error',
+        });
+      }
+    }
+  }
+  return { text, stopReason };
+}
+
+/**
+ * The retry loop shared by plain and streaming calls. `consume` reads an OK
+ * response. Once any text has reached the caller, a failure is not retried
+ * (that would repeat text the user has already seen).
+ */
+async function withRetries(body, consume, { signal, timeoutMs = config.llmTimeoutMs, delivered = () => false } = {}) {
   for (let n = 1; ; n++) {
     await acquireSlot();
+    const attemptSignal = signal ? AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs);
     try {
-      return await attempt(body);
+      return await consume(await send(body, attemptSignal));
     } catch (err) {
-      if (!err.retryable || n >= config.llmMaxAttempts) throw err;
+      if (signal?.aborted) throw err;
+      if (err.name === 'TimeoutError') err = new LLMError(`LLM request timed out after ${timeoutMs} ms`, { retryable: true });
+      if (!(err instanceof LLMError) || !err.retryable || n >= config.llmMaxAttempts || delivered()) throw err;
       const backoff = Math.min(30_000, 500 * 2 ** (n - 1)) * (0.5 + Math.random() / 2);
       const wait = Math.max(backoff, err.retryAfterMs ?? 0);
       if (err.status === 429) backOffAll(wait);
@@ -103,6 +155,37 @@ export async function callLLM({ system, messages, maxTokens }) {
       await sleep(wait);
     }
   }
+}
+
+/** One Messages API call with rate limiting, timeout and retries. */
+export function callLLM({ system, messages, maxTokens }) {
+  const body = { model: config.model, max_tokens: maxTokens, messages, ...(system && { system }) };
+  return withRetries(body, readJsonReply);
+}
+
+/**
+ * Streaming call: onText receives text as the provider produces it. Providers
+ * (or sandboxes) that ignore `stream: true` and answer with plain JSON are
+ * handled too: the whole text is delivered as one chunk.
+ */
+export function callLLMStream({ system, messages, maxTokens, onText, signal }) {
+  const body = { model: config.model, max_tokens: maxTokens, messages, stream: true, ...(system && { system }) };
+  let delivered = false;
+  const emit = (t) => {
+    if (!t) return;
+    delivered = true;
+    onText(t);
+  };
+  return withRetries(
+    body,
+    async (res) => {
+      if ((res.headers.get('content-type') ?? '').includes('text/event-stream')) return readEventStream(res, emit);
+      const reply = await readJsonReply(res);
+      emit(reply.text);
+      return reply;
+    },
+    { signal, timeoutMs: config.llmTimeoutMs * 2, delivered: () => delivered },
+  );
 }
 
 const EXTRACT_PROMPT = `You are helping an employee fill in an expense report.
@@ -128,6 +211,7 @@ export function extractReceipt(text) {
   return callLLM({ system: EXTRACT_PROMPT, messages: [{ role: 'user', content: `Receipt:\n${text}` }], maxTokens: 300 });
 }
 
-export async function chat(system, messages) {
-  return (await callLLM({ system, messages, maxTokens: 500 })).text;
+/** Assistant answer, streamed through onText. Returns the full text. */
+export async function chat(system, messages, { onText = () => {}, signal } = {}) {
+  return (await callLLMStream({ system, messages, maxTokens: 500, onText, signal })).text;
 }

@@ -209,11 +209,48 @@ const routes = [
   }],
 
   // POST /ask   {"question": "..."}
+  // With "Accept: text/event-stream" the answer is streamed as server-sent events:
+  //   event: delta  data: {"text": "..."}                       (repeated)
+  //   event: done   data: {"answer", "source", "message"}
+  // Otherwise the response is the complete {answer, source, message} as JSON.
   ['POST', /^\/ask$/, {}, async (req, res, _params, { user }) => {
     const body = await readJson(req);
     const question = typeof body?.question === 'string' ? body.question.trim() : '';
     if (!question || question.length > 500) throw new HttpError(400, 'question must be a non-empty string of at most 500 characters');
-    send(res, 200, await ask(user, question));
+
+    if (!(req.headers.accept ?? '').includes('text/event-stream')) {
+      return send(res, 200, await ask(user, question));
+    }
+
+    res.writeHead(200, {
+      'content-type': 'text/event-stream; charset=utf-8',
+      'cache-control': 'no-store',
+      'x-accel-buffering': 'no', // don't let a reverse proxy buffer the stream
+      ...SECURITY_HEADERS,
+    });
+    const event = (name, data) => res.write(`event: ${name}\ndata: ${JSON.stringify(data)}\n\n`);
+    // Stop the LLM call if the browser goes away mid-answer.
+    const abort = new AbortController();
+    res.on('close', () => {
+      if (!res.writableEnded) abort.abort();
+    });
+    try {
+      const result = await ask(user, question, { signal: abort.signal, onText: (text) => event('delta', { text }) });
+      if (result) event('done', result);
+    } catch (err) {
+      log.error('streamed answer failed', { userId: user.id, error: err.message });
+      event('error', { message: 'Something went wrong. Please try again.' });
+    }
+    res.end();
+  }],
+
+  // The assistant conversation, oldest first; survives refreshes and restarts.
+  ['GET', /^\/chat$/, {}, (req, res, _params, { user }) => {
+    send(res, 200, { messages: db.listChatMessages(user.id) });
+  }],
+
+  ['DELETE', /^\/chat$/, {}, (req, res, _params, { user }) => {
+    send(res, 200, { deleted: db.clearChat(user.id) });
   }],
 ];
 
