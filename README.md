@@ -55,45 +55,56 @@ Below the report, employees can ask questions about it. Suggested questions ("Wh
 ```
 
 - **Scans** are plain text, as our scanning app exports them: one receipt per page, with pages separated by a form-feed character (`\f`).
-- **`src/server.js`**: HTTP API (Node's built-in `http` module, no framework).
-- **`src/worker.js`**: an in-process queue. It splits a scan into pages and sends each receipt to the LLM.
-- **`src/llm.js`**: the prompts and the calls to the LLM provider.
+- **`src/server.js`**: HTTP API (Node's built-in `http` module, no framework). Streams uploads to disk with size/page limits.
+- **`src/auth.js`**: per-user API tokens (stored hashed). All data is scoped to the user.
+- **`src/worker.js`**: background worker. The queue is the `documents` table, so work survives restarts. It splits a scan into pages and sends each receipt to the LLM.
+- **`src/llm.js`**: the prompts and the calls to the LLM provider: rate limiting, timeouts, retries.
+- **`src/extraction.js`**: parses and validates the LLM's reply; flags lines that need review.
 - **`src/assistant.js`**: "Ask about your expenses": suggested questions answered in code, everything else sent to the LLM.
-- **`src/db.js`**: a JSON-file database.
+- **`src/db.js`**: SQLite (Node's built-in `node:sqlite`). Amounts are stored in cents.
 - **`public/index.html`**: the UI employees use to upload scans and review their expense report.
 - **`vendor/llm-sandbox/`**: the provider's local sandbox, which speaks the Anthropic Messages API format. It comes prebuilt from the vendor, so treat it as a third-party service you don't control, and don't modify it.
 
-There are no npm dependencies. You need Node 20+.
+There are no npm dependencies. You need Node 22.13+ (for `node:sqlite`).
 
 ## Running it
 
 ```bash
-npm run samples          # generate sample receipt scans into ./samples
-npm run llm-sandbox      # terminal 1: the LLM provider on :4000
-npm start                # terminal 2: ReceiptBox on :3000
+npm run samples                       # generate sample receipt scans into ./samples
+npm run create-user -- "Your Name"    # prints an API token (shown once)
+npm run llm-sandbox                   # terminal 1: the LLM provider on :4000
+LLM_API_KEY=dev npm start             # terminal 2: ReceiptBox on :3000 (any key works with the sandbox)
+npm test                              # unit + end-to-end tests (starts its own sandbox and server)
 ```
 
-Then open **http://localhost:3000**. Upload one of the sample scans, watch the receipts being read, and see the expense report fill in. Click any line to check it against the original receipt, and ask the assistant about your expenses.
+Then open **http://localhost:3000** and sign in with the token. Upload one of the sample scans, watch the receipts being read, and see the expense report fill in. Click any line to check it against the original receipt, and ask the assistant about your expenses.
 
-`npm run demo` does the same from the terminal: it uploads the samples and prints a live status table. `npm run samples -- --big 600` also generates a ~600 MB file.
+`RECEIPTBOX_TOKEN=<token> npm run demo` does the same from the terminal: it uploads the samples and prints a live status table. `npm run samples -- --big 600` also generates a ~600 MB file.
 
 If port 3000 is already in use, start the server with `PORT=3001 npm start`.
 
+Configuration is by environment variable (see `src/config.js`): `LLM_API_KEY` (required), `LLM_URL`, `LLM_MODEL`, `PORT`, `DATA_DIR`, `MAX_UPLOAD_BYTES`, `MAX_PAGES`, `LLM_RPS`, `LLM_TIMEOUT_MS`, `WORKER_CONCURRENCY`, `PAGE_CONCURRENCY`, `LOG_LEVEL`.
+
 ### API
+
+All routes except `/`, `/health`, `/samples/*` and `/questions` need `Authorization: Bearer <token>`. Errors are `{"error": "message"}` with a 4xx/5xx status.
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/documents?filename=x.txt` | Upload a scan (raw request body). Returns the document record. |
-| `GET` | `/documents` | List uploaded scans with status and progress. |
+| `POST` | `/documents?filename=x.txt` | Upload a scan (raw request body, ≤ 10 MB, ≤ 500 pages; else `413`). Returns the document record. |
+| `GET` | `/documents` | Your scans with status (`pending`, `processing`, `done`, `failed`), progress, and counts of lines needing review / failed. |
 | `GET` | `/documents/:id` | A scan with its extracted receipts. |
-| `POST` | `/documents/:id/retry` | Re-process a scan. |
-| `GET` | `/search?q=text&category=meals` | Expense report lines (extracted receipts), optionally filtered. |
+| `POST` | `/documents/:id/retry` | Re-process a scan (replaces its lines). `409` while it is still processing. |
+| `GET` | `/search?q=text&category=meals` | Your expense report lines, optionally filtered (filters combine; text search is case-insensitive). |
 | `GET` | `/questions` | Suggested questions for the assistant. |
 | `POST` | `/ask` | Ask the assistant. Body: `{"question": "..."}`. Returns `{answer, source}`, where `source` is `report`, `llm` or `error`. |
+| `GET` | `/health` | Liveness/readiness check. |
+
+Each expense line has `status` (`ok`, `needs_review` or `failed`) and `issues` (reasons, for the employee). Only `ok` lines count towards the total to reimburse. Amounts are given as `total` (number) and `totalCents` (integer); totals are never added across currencies.
 
 ```bash
-curl -X POST --data-binary @samples/weekend-trip.txt "localhost:3000/documents?filename=weekend-trip.txt"
-curl localhost:3000/documents
+curl -X POST -H "authorization: Bearer $TOKEN" --data-binary @samples/weekend-trip.txt "localhost:3000/documents?filename=weekend-trip.txt"
+curl -H "authorization: Bearer $TOKEN" localhost:3000/documents
 ```
 
 ---
