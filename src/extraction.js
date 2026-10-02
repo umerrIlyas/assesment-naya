@@ -4,7 +4,7 @@ import { extractReceipt } from './llm.js';
 // not fail the whole scan: the page is saved with status 'failed' instead.
 export async function extractPage(text) {
   try {
-    const r = await extractReceipt(text);
+    const r = JSON.parse((await extractReceipt(text)).text);
     return {
       status: 'ok',
       merchant: r.merchant,
