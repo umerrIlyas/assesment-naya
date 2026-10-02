@@ -134,4 +134,4 @@ Priority = (harm to a customer) × (likelihood next week). Wrong money and leake
 5. A stronger injection defence: a second extraction pass that never sees the raw text near instruction-like lines, or a check against the receipt's own `TOTAL` line.
 6. Per-user quotas and LLM cost budgets, and a retention policy for uploads.
 
-AI usage: built with Claude Code; the session log is in `logs/`.
+AI usage: built with the help of Claude Code (an AI coding assistant).
