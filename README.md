@@ -56,7 +56,7 @@ Below the report, employees can ask questions about it. Suggested questions ("Wh
 
 - **Scans** are plain text, as our scanning app exports them: one receipt per page, with pages separated by a form-feed character (`\f`).
 - **`src/server.js`**: HTTP API (Node's built-in `http` module, no framework). Streams uploads to disk with size/page limits.
-- **`src/auth.js`**: per-user API tokens (stored hashed). All data is scoped to the user.
+- **`src/auth.js`**: email + password sign-up/login with server-side sessions (HttpOnly cookie), plus API tokens for scripts. All data is scoped to the user.
 - **`src/worker.js`**: background worker. The queue is the `documents` table, so work survives restarts. It splits a scan into pages and sends each receipt to the LLM.
 - **`src/llm.js`**: the prompts and the calls to the LLM provider: rate limiting, timeouts, retries.
 - **`src/extraction.js`**: parses and validates the LLM's reply; flags lines that need review.
@@ -71,23 +71,23 @@ There are no npm dependencies. You need Node 22.13+ (for `node:sqlite`).
 
 ```bash
 npm run samples                       # generate sample receipt scans into ./samples
-npm run create-user -- "Your Name"    # prints an API token (shown once)
+npm run create-user -- "Your Name"    # optional: an API token for scripts/curl (shown once)
 npm run llm-sandbox                   # terminal 1: the LLM provider on :4000
 LLM_API_KEY=dev npm start             # terminal 2: ReceiptBox on :3000 (any key works with the sandbox)
 npm test                              # unit + end-to-end tests (starts its own sandbox and server)
 ```
 
-Then open **http://localhost:3000** and sign in with the token. Upload one of the sample scans, watch the receipts being read, and see the expense report fill in. Click any line to check it against the original receipt, and ask the assistant about your expenses.
+Then open **http://localhost:3000**, create an account and log in. Upload one of the sample scans, watch the receipts being read, and see the expense report fill in. Click any line to check it against the original receipt, and ask the assistant about your expenses.
 
 `RECEIPTBOX_TOKEN=<token> npm run demo` does the same from the terminal: it uploads the samples and prints a live status table. `npm run samples -- --big 600` also generates a ~600 MB file.
 
 If port 3000 is already in use, start the server with `PORT=3001 npm start`.
 
-Configuration is by environment variable (see `src/config.js`): `LLM_API_KEY` (required), `LLM_URL`, `LLM_MODEL`, `PORT`, `DATA_DIR`, `MAX_UPLOAD_BYTES`, `MAX_PAGES`, `LLM_RPS`, `LLM_TIMEOUT_MS`, `WORKER_CONCURRENCY`, `PAGE_CONCURRENCY`, `LOG_LEVEL`.
+Configuration is by environment variable (see `src/config.js`): `LLM_API_KEY` (required), `LLM_URL`, `LLM_MODEL`, `PORT`, `DATA_DIR`, `MAX_UPLOAD_BYTES`, `MAX_PAGES`, `LLM_RPS`, `LLM_TIMEOUT_MS`, `WORKER_CONCURRENCY`, `PAGE_CONCURRENCY`, `LOG_LEVEL`, `COOKIE_SECURE` (defaults to on when `NODE_ENV=production`), `LOGIN_MAX_FAILURES`.
 
 ### API
 
-All routes except `/`, `/health`, `/samples/*` and `/questions` need `Authorization: Bearer <token>`. Errors are `{"error": "message"}` with a 4xx/5xx status.
+All routes except `/`, `/health`, `/samples/*`, `/questions` and `/auth/signup|login|logout` need a session cookie (from login) or `Authorization: Bearer <token>`. Cookie-authenticated writes must come from the same origin. Errors are `{"error": "message"}` with a 4xx/5xx status.
 
 | Method | Path | Description |
 |---|---|---|
@@ -99,6 +99,10 @@ All routes except `/`, `/health`, `/samples/*` and `/questions` need `Authorizat
 | `GET` | `/questions` | Suggested questions for the assistant. |
 | `POST` | `/ask` | Ask the assistant. Body: `{"question": "..."}`. Returns `{answer, source}`, where `source` is `report`, `llm` or `error`. |
 | `GET` | `/health` | Liveness/readiness check. |
+| `POST` | `/auth/signup` | `{"name", "email", "password"}` (password ≥ 10 chars). Creates the account and logs in (sets the session cookie). `409` if the email is taken. |
+| `POST` | `/auth/login` | `{"email", "password"}`. Sets the session cookie. `401` on wrong credentials, `429` after repeated failures. |
+| `POST` | `/auth/logout` | Ends the session. |
+| `GET` | `/auth/me` | The logged-in user. |
 
 Each expense line has `status` (`ok`, `needs_review` or `failed`) and `issues` (reasons, for the employee). Only `ok` lines count towards the total to reimburse. Amounts are given as `total` (number) and `totalCents` (integer); totals are never added across currencies.
 

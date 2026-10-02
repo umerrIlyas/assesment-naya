@@ -8,7 +8,7 @@ import config, { assertConfig } from './config.js';
 import * as db from './db.js';
 import { notify, startWorker, stopWorker } from './worker.js';
 import { ask, SUGGESTED } from './assistant.js';
-import { authenticate } from './auth.js';
+import * as auth from './auth.js';
 import { log } from './log.js';
 import { toPublicDocument, toPublicLine, CATEGORIES } from './views.js';
 
@@ -25,10 +25,28 @@ const SECURITY_HEADERS = {
   'x-frame-options': 'DENY',
 };
 
-function send(res, status, body) {
-  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...SECURITY_HEADERS });
+function send(res, status, body, headers = {}) {
+  res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store', ...SECURITY_HEADERS, ...headers });
   res.end(JSON.stringify(body));
 }
+
+/**
+ * CSRF defence for cookie-authenticated requests (on top of SameSite=Lax):
+ * a state-changing request from a browser must come from our own origin.
+ */
+function assertSameOrigin(req) {
+  const origin = req.headers.origin;
+  if (!origin) return; // non-browser clients don't send Origin; browsers always do on POST
+  let host;
+  try {
+    host = new URL(origin).host;
+  } catch {
+    throw new HttpError(403, 'Cross-site request blocked');
+  }
+  if (host !== req.headers.host) throw new HttpError(403, 'Cross-site request blocked');
+}
+
+const publicUser = (u) => ({ id: u.id, name: u.name, email: u.email ?? null });
 
 async function readJson(req, limit = 16 * 1024) {
   let size = 0;
@@ -146,6 +164,46 @@ const routes = [
     send(res, 200, db.searchLines(user.id, { q, category }).map(toPublicLine));
   }],
 
+  // ---- accounts ----
+  ['POST', /^\/auth\/signup$/, { public: true }, async (req, res) => {
+    assertSameOrigin(req);
+    const body = await readJson(req);
+    let user;
+    try {
+      user = await auth.signUp({ email: body?.email, password: body?.password, name: body?.name });
+    } catch (err) {
+      if (err instanceof auth.AuthError) throw new HttpError(err.status, err.message);
+      throw err;
+    }
+    log.info('user signed up', { userId: user.id });
+    send(res, 201, { user: publicUser(user) }, { 'set-cookie': auth.sessionCookie(auth.startSession(user.id)) });
+  }],
+
+  ['POST', /^\/auth\/login$/, { public: true }, async (req, res) => {
+    assertSameOrigin(req);
+    const body = await readJson(req);
+    const ip = req.socket.remoteAddress;
+    if (auth.loginBlocked(ip, body?.email)) throw new HttpError(429, 'Too many failed attempts. Try again in 15 minutes.');
+    const user = await auth.logIn({ email: body?.email, password: body?.password });
+    if (!user) {
+      auth.recordLoginFailure(ip, body?.email);
+      log.warn('login failed', { ip });
+      throw new HttpError(401, 'Incorrect email or password');
+    }
+    auth.clearLoginFailures(body?.email);
+    send(res, 200, { user: publicUser(user) }, { 'set-cookie': auth.sessionCookie(auth.startSession(user.id)) });
+  }],
+
+  ['POST', /^\/auth\/logout$/, { public: true }, (req, res) => {
+    assertSameOrigin(req);
+    auth.endSession(auth.readCookie(req, auth.SESSION_COOKIE));
+    send(res, 200, { ok: true }, { 'set-cookie': auth.clearedSessionCookie() });
+  }],
+
+  ['GET', /^\/auth\/me$/, {}, (req, res, _params, { user }) => {
+    send(res, 200, { user: publicUser(user) });
+  }],
+
   ['GET', /^\/questions$/, { public: true }, (req, res) => {
     send(res, 200, Object.keys(SUGGESTED));
   }],
@@ -165,8 +223,13 @@ async function handle(req, res) {
     const match = url.pathname.match(pattern);
     if (!match) continue;
     if (req.method !== method) continue;
-    const user = opts.public ? null : authenticate(req);
-    if (!opts.public && !user) throw new HttpError(401, 'Missing or invalid API token');
+    let user = null;
+    if (!opts.public) {
+      const result = auth.authenticate(req);
+      if (!result) throw new HttpError(401, 'Please log in');
+      if (result.via === 'session' && req.method !== 'GET') assertSameOrigin(req);
+      user = result.user;
+    }
     let params;
     try {
       params = match.slice(1).map(decodeURIComponent);
@@ -199,6 +262,7 @@ const server = http.createServer(async (req, res) => {
 assertConfig();
 fs.mkdirSync(config.uploadDir, { recursive: true });
 db.open();
+db.deleteExpiredSessions();
 startWorker();
 server.listen(config.port, () => log.info('receiptbox listening', { url: `http://localhost:${config.port}` }));
 

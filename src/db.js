@@ -19,6 +19,14 @@ CREATE TABLE IF NOT EXISTS users (
   created_at  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS sessions (
+  token_hash  TEXT PRIMARY KEY,           -- SHA-256 of the cookie value
+  user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sessions_user ON sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS documents (
   id               TEXT PRIMARY KEY,
   user_id          TEXT NOT NULL REFERENCES users(id),
@@ -56,12 +64,21 @@ export function open(dbPath = config.dbPath) {
   db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;');
   db.exec(SCHEMA);
+  migrate();
   return db;
 }
 
 export function close() {
   db?.close();
   db = undefined;
+}
+
+// Additive migrations for databases created before a column existed.
+function migrate() {
+  const userColumns = new Set(db.prepare('PRAGMA table_info(users)').all().map((c) => c.name));
+  if (!userColumns.has('email')) db.exec('ALTER TABLE users ADD COLUMN email TEXT');
+  if (!userColumns.has('password_hash')) db.exec('ALTER TABLE users ADD COLUMN password_hash TEXT');
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS users_email ON users(email)');
 }
 
 const now = () => new Date().toISOString();
@@ -80,13 +97,47 @@ function tx(fn) {
 
 // ---- users -----------------------------------------------------------------
 
-export function createUser({ id, name, tokenHash }) {
-  db.prepare('INSERT INTO users (id, name, token_hash, created_at) VALUES (?, ?, ?, ?)').run(id, name, tokenHash, now());
-  return { id, name };
+export function createUser({ id, name, tokenHash, email = null, passwordHash = null }) {
+  db.prepare('INSERT INTO users (id, name, email, password_hash, token_hash, created_at) VALUES (?, ?, ?, ?, ?, ?)').run(
+    id,
+    name,
+    email,
+    passwordHash,
+    tokenHash,
+    now(),
+  );
+  return { id, name, email };
 }
 
 export function findUserByTokenHash(tokenHash) {
-  return db.prepare('SELECT id, name FROM users WHERE token_hash = ?').get(tokenHash);
+  return db.prepare('SELECT id, name, email FROM users WHERE token_hash = ?').get(tokenHash);
+}
+
+export function findUserByEmail(email) {
+  return db.prepare('SELECT id, name, email, password_hash AS passwordHash FROM users WHERE email = ?').get(email);
+}
+
+// ---- sessions --------------------------------------------------------------
+
+export function createSession({ tokenHash, userId, expiresAt }) {
+  db.prepare('INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)').run(tokenHash, userId, now(), expiresAt);
+}
+
+export function findUserBySession(tokenHash) {
+  return db
+    .prepare(
+      `SELECT u.id, u.name, u.email FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token_hash = ? AND s.expires_at > ?`,
+    )
+    .get(tokenHash, now());
+}
+
+export function deleteSession(tokenHash) {
+  db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+}
+
+export function deleteExpiredSessions() {
+  return db.prepare('DELETE FROM sessions WHERE expires_at <= ?').run(now()).changes;
 }
 
 // ---- documents -------------------------------------------------------------

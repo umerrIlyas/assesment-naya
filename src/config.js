@@ -41,6 +41,10 @@ const config = {
   // Below this the line is still counted but flagged for the employee to check.
   lowConfidence: 0.7,
 
+  // Auth. Cookies are Secure (HTTPS only) in production; plain http://localhost needs them off.
+  secureCookies: process.env.COOKIE_SECURE ? process.env.COOKIE_SECURE === 'true' : process.env.NODE_ENV === 'production',
+  loginMaxFailures: num('LOGIN_MAX_FAILURES', 5), // per email per 15 min (x5 per IP)
+
   // Assistant: free-text questions per user per minute.
   askPerMinute: num('ASK_PER_MINUTE', 20),
 

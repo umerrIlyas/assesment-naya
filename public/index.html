@@ -75,8 +75,18 @@
   .msg.a { justify-self: start; background: var(--bg); }
   .msg.a.error { color: var(--failed); }
   .review { color: var(--processing); font-size: 12px; }
-  #auth { display: flex; gap: 8px; align-items: center; margin-top: 10px; font-size: 13px; }
-  #auth input { flex: 1; max-width: 360px; }
+  [hidden] { display: none !important; }
+  header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+  #whoami { display: flex; gap: 10px; align-items: center; font-size: 13px; color: var(--muted); }
+  #auth-card { max-width: 380px; margin: 48px auto; padding: 0 16px; }
+  #auth-card section { padding: 24px; }
+  #auth-card h2 { margin: 0 0 4px; font-size: 18px; }
+  #auth-card form { display: grid; gap: 12px; margin-top: 16px; }
+  #auth-card label { display: grid; gap: 4px; font-size: 13px; color: var(--muted); }
+  #auth-card input { width: 100%; box-sizing: border-box; padding: 8px 10px; }
+  #auth-card button.primary { padding: 8px 10px; }
+  #auth-error { color: var(--failed); font-size: 13px; min-height: 18px; }
+  .link { background: none; border: none; padding: 0; color: var(--accent); text-decoration: underline; cursor: pointer; font: inherit; }
   .msg small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
 </style>
 </head>
@@ -84,14 +94,25 @@
 <header>
   <h1>ReceiptBox</h1>
   <p>Scan your trip receipts into one file, upload it, and get your expense report filled in for you.</p>
-  <form id="auth">
-    <span id="auth-label" class="muted">Your API token:</span>
-    <input type="password" id="token" placeholder="rb_…  (npm run create-user)" autocomplete="off">
-    <button type="submit" id="auth-btn">Sign in</button>
-  </form>
+  <div id="whoami" hidden><span id="whoami-name"></span><button type="button" id="logout">Log out</button></div>
 </header>
 
-<main>
+<div id="auth-card" hidden>
+  <section>
+    <h2 id="auth-title">Log in</h2>
+    <p class="muted" id="auth-sub" style="margin:0">Welcome back. Log in to see your expense report.</p>
+    <form id="auth-form" novalidate>
+      <label id="name-field" hidden>Name<input type="text" id="auth-name" autocomplete="name" maxlength="100"></label>
+      <label>Email<input type="email" id="auth-email" autocomplete="email" required></label>
+      <label>Password<input type="password" id="auth-password" autocomplete="current-password" required minlength="10"></label>
+      <div id="auth-error" role="alert"></div>
+      <button class="primary" type="submit" id="auth-submit">Log in</button>
+    </form>
+    <p class="muted" style="margin:16px 0 0;font-size:13px"><span id="auth-switch-text">New to ReceiptBox?</span> <button type="button" class="link" id="auth-switch">Create an account</button></p>
+  </section>
+</div>
+
+<main hidden>
   <section>
     <h2><span class="step">1</span>Upload your scanned receipts</h2>
     <p class="hint">One file from the scanning app, with one receipt per page: coffee, taxis, hotels, flights, anything you're claiming.</p>
@@ -178,35 +199,73 @@ const money = (v, currency = 'USD') => {
 let selectedDoc = null;
 
 // ---- auth --------------------------------------------------------------------
-// Each employee has an API token. It is kept in this browser only.
-const store = {
-  get: () => { try { return localStorage.getItem('rb_token') || ''; } catch { return ''; } },
-  set: (t) => { try { t ? localStorage.setItem('rb_token', t) : localStorage.removeItem('rb_token'); } catch {} },
-};
-let token = store.get();
-function renderAuth() {
-  $('#token').hidden = !!token;
-  $('#auth-label').textContent = token ? 'Signed in.' : 'Your API token:';
-  $('#auth-btn').textContent = token ? 'Sign out' : 'Sign in';
+// Login and sign-up set an HttpOnly session cookie; the page never sees it.
+let me = null;
+let mode = 'login';
+
+function renderMode() {
+  const signup = mode === 'signup';
+  $('#auth-title').textContent = signup ? 'Create your account' : 'Log in';
+  $('#auth-sub').textContent = signup ? 'Upload your receipts and get your expense report filled in.' : 'Welcome back. Log in to see your expense report.';
+  $('#name-field').hidden = !signup;
+  $('#auth-password').autocomplete = signup ? 'new-password' : 'current-password';
+  $('#auth-password').placeholder = signup ? 'At least 10 characters' : '';
+  $('#auth-submit').textContent = signup ? 'Create account' : 'Log in';
+  $('#auth-switch-text').textContent = signup ? 'Already have an account?' : 'New to ReceiptBox?';
+  $('#auth-switch').textContent = signup ? 'Log in' : 'Create an account';
+  $('#auth-error').textContent = '';
 }
-$('#auth').addEventListener('submit', (e) => {
-  e.preventDefault();
-  token = token ? '' : $('#token').value.trim();
-  store.set(token);
-  $('#token').value = '';
-  renderAuth();
-  refresh();
+
+function showApp(user) {
+  me = user;
+  $('#auth-card').hidden = !!user;
+  $('main').hidden = !user;
+  $('#whoami').hidden = !user;
+  $('#whoami-name').textContent = user ? `${user.name}${user.email ? ` (${user.email})` : ''}` : '';
+  if (user) refresh();
+  else $('#auth-email').focus();
+}
+
+$('#auth-switch').addEventListener('click', () => {
+  mode = mode === 'login' ? 'signup' : 'login';
+  renderMode();
 });
-renderAuth();
+
+$('#auth-form').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const body = { email: $('#auth-email').value.trim(), password: $('#auth-password').value };
+  if (mode === 'signup') body.name = $('#auth-name').value.trim();
+  if (!body.email || !body.password || (mode === 'signup' && !body.name)) {
+    $('#auth-error').textContent = 'Please fill in every field.';
+    return;
+  }
+  $('#auth-submit').disabled = true;
+  $('#auth-error').textContent = '';
+  try {
+    const res = await fetch(`/auth/${mode}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+    if (!res.ok) throw new Error(await errorMessage(res));
+    $('#auth-password').value = '';
+    showApp((await res.json()).user);
+  } catch (err) {
+    $('#auth-error').textContent = err.message;
+  } finally {
+    $('#auth-submit').disabled = false;
+  }
+});
+
+$('#logout').addEventListener('click', async () => {
+  await fetch('/auth/logout', { method: 'POST' }).catch(() => {});
+  $('#chat').innerHTML = '';
+  showApp(null);
+});
 
 async function api(path, options = {}) {
-  const res = await fetch(path, { ...options, headers: { ...options.headers, authorization: `Bearer ${token}` } });
-  if (res.status === 401) {
-    token = '';
-    store.set('');
-    renderAuth();
-    throw new Error('Please sign in with your API token');
+  const res = await fetch(path, options);
+  if (res.status === 401 && me) {
+    showApp(null);
+    $('#auth-error').textContent = 'Your session has ended. Please log in again.';
   }
+  if (res.status === 401) throw new Error('Please log in');
   return res;
 }
 const errorMessage = async (res) => { try { return (await res.json()).error || `HTTP ${res.status}`; } catch { return `HTTP ${res.status}`; } };
@@ -416,15 +475,16 @@ $('#ask-form').addEventListener('submit', (e) => {
 });
 
 function refresh() {
-  if (!token) {
-    $('#docs').innerHTML = '<tr><td colspan="7" class="empty">Sign in with your API token above.</td></tr>';
-    return;
-  }
+  if (!me) return;
   refreshDocs();
   refreshRows();
   if (selectedDoc) showDetail(selectedDoc.id, selectedDoc.page, false);
 }
-refresh();
+renderMode();
+fetch('/auth/me')
+  .then((res) => (res.ok ? res.json() : { user: null }))
+  .then(({ user }) => showApp(user))
+  .catch(() => showApp(null));
 setInterval(refresh, 2000);
 </script>
 </body>
